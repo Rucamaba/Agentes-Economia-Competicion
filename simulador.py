@@ -1,11 +1,8 @@
 import random
-import time
 import re
 from itertools import combinations
-from vendedor import ejecutar_agente_vendedor
-from comprador import ejecutar_agente_comprador
-
-
+from comprador import AgenteComprador
+from vendedor import AgenteVendedor
 
 def formatear_variacion_precio(precio_actual, precio_anterior):
     if precio_anterior is None:
@@ -91,27 +88,29 @@ def aplicar_guardrail_precio(precio_nuevo, precio_anterior, demanda_ultima, fue_
 
     return round(max(5.0, min(80.0, ajustado)), 2)
 
-# 1. Configuración Inicial del Mercado (Estrellas limitadas a 2 decimales)
+# ==================================================
+# CONFIGURACIÓN INICIAL DEL MERCADO Y VARIABLES
+# ==================================================
 vendedores = {
     "A": {"chasis": round(random.uniform(0.0, 10.0), 2), "motor": round(random.uniform(0.0, 10.0), 2), "ruedas": round(random.uniform(0.0, 10.0), 2), "precios": {}, "ingresos_totales": 0.0},
     "B": {"chasis": round(random.uniform(0.0, 10.0), 2), "motor": round(random.uniform(0.0, 10.0), 2), "ruedas": round(random.uniform(0.0, 10.0), 2), "precios": {}, "ingresos_totales": 0.0},
     "C": {"chasis": round(random.uniform(0.0, 10.0), 2), "motor": round(random.uniform(0.0, 10.0), 2), "ruedas": round(random.uniform(0.0, 10.0), 2), "precios": {}, "ingresos_totales": 0.0}
 }
 
-# Lista de nuestros 3 pilotos competidores
 pilotos = ["Fernando Alonso", "Carlos Sainz", "Max Verstappen"]
 puntuaciones_pilotos = {piloto: 0 for piloto in pilotos}
 
-# Guardamos la referencia de precios de la carrera anterior para mostrar subidas/bajadas
+# --- CORRECCIÓN CRUCIAL: Inicializamos los objetos aquí, ahora que ya existen las variables anteriores ---
+objetos_tiendas = {letra: AgenteVendedor(letra) for letra in vendedores}
+objetos_pilotos = {piloto: AgenteComprador(piloto) for piloto in pilotos}
+
 precios_anterior_carrera = {
     letra: {"chasis": None, "motor": None, "ruedas": None}
     for letra in vendedores
 }
 
-# Histórico para los agentes
 historico_mercado = "Inicio del campeonato. Ninguna carrera disputada aún."
 
-# Estadísticas de la carrera anterior para estabilizar decisiones
 estadisticas_ultima_carrera = {
     "demanda": {
         "chasis": {letra: 0 for letra in vendedores},
@@ -129,9 +128,8 @@ print("==================================================\n")
 for carrera in range(1, 7):
     print(f"--- 🏁 CARRERA {carrera} DE 6 ---")
     
-    # FASE 1: Las tiendas fijan precios usando la IA
+    # FASE 1: Las tiendas fijan precios usando el algoritmo evolutivo Q
     print("\n[Tiendas fijando precios...]")
-    # 1. Construimos un resumen analítico de demandas y ganadores para romper el equilibrio cooperativo
     resumen_metricas = "HISTORICO_ULTIMA_CARRERA:\n"
     if carrera == 1:
         resumen_metricas += "Primera carrera. No hay datos de demandas previos.\n"
@@ -146,7 +144,6 @@ for carrera in range(1, 7):
         ganador_componentes = estadisticas_ultima_carrera["uso_ganador"]
         resumen_metricas += f"Componentes del coche GANADOR: Chasis de {ganador_componentes['chasis']}, Motor de {ganador_componentes['motor']}, Ruedas de {ganador_componentes['ruedas']}.\n"
 
-    # 2. Construimos texto con los precios de la carrera anterior
     precios_prev_texto = "PRECIOS_CARRERA_ANTERIOR:\n"
     for letra_prev in vendedores:
         prev = precios_anterior_carrera[letra_prev]
@@ -155,26 +152,47 @@ for carrera in range(1, 7):
         ru = f"{prev['ruedas']}€" if prev['ruedas'] is not None else "sin referencia"
         precios_prev_texto += f"Vendedor {letra_prev}: Chasis {ch} | Motor {mo} | Ruedas {ru}\n"
 
-    # 3. Inyectamos las métricas masticadas directas al input del vendedor
-    # 3. Inyectamos las métricas masticadas directas al input del vendedor
     for letra, datos in vendedores.items():
-        contexto_vendedor = resumen_metricas + "\n" + precios_prev_texto + "\n" + historico_mercado
-        decision = ejecutar_agente_vendedor(datos, contexto_vendedor)
-        time.sleep(1.5)  # Pequeña pausa para evitar llamadas demasiado rápidas a la API
+        if carrera == 1:
+            cuota_ultima = 33.3  # Salen en igualdad de condiciones en la Carrera 1
+        else:
+            prev_prices = precios_anterior_carrera[letra]
+            # Calculamos cuánto ingresó esta tienda en la carrera anterior
+            ingresos_tienda_ant = (
+                estadisticas_ultima_carrera["demanda"]["chasis"][letra] * (prev_prices["chasis"] or 25.0) +
+                estadisticas_ultima_carrera["demanda"]["motor"][letra] * (prev_prices["motor"] or 20.0) +
+                estadisticas_ultima_carrera["demanda"]["ruedas"][letra] * (prev_prices["ruedas"] or 15.0)
+            )
+            # Calculamos el total gastado por todos los pilotos en la carrera anterior
+            total_real_ant = 0.0
+            for l_aux in vendedores:
+                p_aux = precios_anterior_carrera[l_aux]
+                total_real_ant += (
+                    estadisticas_ultima_carrera["demanda"]["chasis"][l_aux] * (p_aux["chasis"] or 25.0) +
+                    estadisticas_ultima_carrera["demanda"]["motor"][l_aux] * (p_aux["motor"] or 20.0) +
+                    estadisticas_ultima_carrera["demanda"]["ruedas"][l_aux] * (p_aux["ruedas"] or 15.0)
+                )
+            cuota_ultima = (ingresos_tienda_ant / total_real_ant * 100) if total_real_ant > 0 else 0.0
+
+        # Llamamos al vendedor pasándole su cuota de mercado real
+        decision = objetos_tiendas[letra].decidir_variacion_q(
+            demandas_ultimas=estadisticas_ultima_carrera["demanda"], 
+            uso_ganador=estadisticas_ultima_carrera["uso_ganador"],
+            cuota_mercado_ultima=cuota_ultima
+        )
+        # =========================================================================
         
         prev = precios_anterior_carrera[letra]
         
-        # Si es la primera carrera y no hay precios previos, establecemos un precio base inicial lógico
         p_ch_ant = prev["chasis"] if prev["chasis"] is not None else 25.0
         p_mo_ant = prev["motor"] if prev["motor"] is not None else 20.0
         p_ru_ant = prev["ruedas"] if prev["ruedas"] is not None else 15.0
 
-        # Python aplica las matemáticas puras basadas en la decisión PORCENTUAL libre de la IA
         precio_chasis_nuevo = p_ch_ant * (1.0 + decision.variacion_chasis)
         precio_motor_nuevo = p_mo_ant * (1.0 + decision.variacion_motor)
         precio_ruedas_nuevo = p_ru_ant * (1.0 + decision.variacion_ruedas)
 
-        # Pasamos el resultado por el guardrail para asegurar límites físicos globales (entre 5€ y 80€)
+        # Tus guardrails matemáticos tradicionales se quedan exactamente abajo:
         datos["precios"] = {
             "chasis": aplicar_guardrail_precio(
                 precio_chasis_nuevo,
@@ -196,7 +214,6 @@ for carrera in range(1, 7):
             ),
         }
 
-    # Creamos dos vistas del catálogo: una para el usuario y otra limpia para el piloto
     texto_catalogo_usuario = "CATÁLOGO DISPONIBLE:\n"
     texto_catalogo_piloto = "CATÁLOGO DISPONIBLE:\n"
     for letra, datos in vendedores.items():
@@ -219,17 +236,13 @@ for carrera in range(1, 7):
     print("[Pilotos comprando componentes...]")
     compras_carrera = {}
     for piloto in pilotos:
-        # Pasamos al comprador el catálogo actual y además el histórico de la última carrera
-        eleccion = ejecutar_agente_comprador(piloto, texto_catalogo_piloto + "\n\nHISTORICO_ULTIMA_CARRERA:\n" + historico_mercado)
-        time.sleep(1.5)
+        eleccion = objetos_pilotos[piloto].elegir_componentes_q(vendedores)
         compras_carrera[piloto] = eleccion
         
-        # Recuperamos las letras de los vendedores elegidos para calcular sus precios individuales
         v_ch_letra = normalizar_vendedor(eleccion.vendedor_chasis)
         v_mo_letra = normalizar_vendedor(eleccion.vendedor_motor)
         v_ru_letra = normalizar_vendedor(eleccion.vendedor_ruedas)
         
-        # Intentamos extraer los precios para el desglose visual
         try:
             p_ch = vendedores[v_ch_letra]["precios"]["chasis"] if v_ch_letra in vendedores else None
             p_mo = vendedores[v_mo_letra]["precios"]["motor"] if v_mo_letra in vendedores else None
@@ -242,7 +255,6 @@ for carrera in range(1, 7):
         except Exception:
             coste_desglose = "Error al calcular desglose (formato de tienda inválido)"
 
-        # Imprimimos la información completa sin recortes
         print(f"\n🏎️  Piloto: {piloto}")
         print(f"  💰 Presupuesto invertido: {coste_desglose}")
         print(f"  🧠 Razonamiento completo:\n     \"{eleccion.razonamiento}\"")
@@ -305,53 +317,37 @@ for carrera in range(1, 7):
         except Exception as e:
             print(f"  ❌ {piloto} cometió un error crítico al procesar la respuesta.")
 
-    # --- LÓGICA DE BONUS POR AHORRO (TUS REGLAS DE DESEMPATE) ---
     bonus_por_piloto = {piloto: 0 for piloto in pilotos}
-    
-    pilotos_eligibles_ahorro = [
-        p for p in pilotos_validos if len(p.get("componentes_usados", [])) == 3
-    ]
+    pilotos_eligibles_ahorro = [p for p in pilotos_validos if len(p.get("componentes_usados", [])) == 3]
 
     if len(pilotos_eligibles_ahorro) >= 2:
-        # Ordenamos los pilotos de menor a mayor gasto
         pilotos_ordenados_gasto = sorted(pilotos_eligibles_ahorro, key=lambda x: x["gasto"])
         gastos = [p["gasto"] for p in pilotos_ordenados_gasto]
         
-        # Caso 1: Los 3 karts tienen el mismo precio exacto -> 0 puntos extra para todos
         if len(gastos) == 3 and gastos[0] == gastos[1] == gastos[2]:
             print("  ⚖️ Empate total de costes: Los 3 karts gastaron lo mismo. No se reparten puntos de ahorro.")
         else:
-            # Caso 2: Los dos más baratos empatan
             if gastos[0] == gastos[1]:
                 print(f"  ⚖️  Empate en primer puesto de ahorro ({gastos[0]}€): ¡+2 puntos para ambos!")
                 bonus_por_piloto[pilotos_ordenados_gasto[0]["piloto"]] = 2
                 bonus_por_piloto[pilotos_ordenados_gasto[1]["piloto"]] = 2
-                # El tercer puesto no recibe nada porque ya hay dos primeros
             else:
-                # El primero es único (+2 puntos)
                 bonus_por_piloto[pilotos_ordenados_gasto[0]["piloto"]] = 2
-                
-                # Evaluamos el segundo puesto de ahorro
                 if len(gastos) == 3 and gastos[1] == gastos[2]:
-                    # Si el segundo puesto empata, no se reparte: solo cuenta el más barato
                     print(f"  ⚖️  Empate en segundo puesto de ahorro ({gastos[1]}€): solo se reparte el primer puesto.")
                 else:
-                    # Segundo puesto único (+1 punto)
                     bonus_por_piloto[pilotos_ordenados_gasto[1]["piloto"]] = 1
     else:
         print("  ⚖️ No hay suficientes karts completos (3 piezas) para repartir puntos de ahorro.")
 
-    # --- SIMULACIÓN DE LA CARRERA ---
     resultados_carrera = []
     for p in pilotos_validos:
         ruido = random.uniform(-1.5, 1.5)
         puntuacion_final = p["vel_base"] + p["penalizacion"] + ruido
         resultados_carrera.append({"piloto": p["piloto"], "puntos_carrera": puntuacion_final, "gasto": p["gasto"], "configuracion": p.get("configuracion", "INVÁLIDA"), "componentes_usados": p.get("componentes_usados", [])})
 
-    # Ordenar resultados de carrera (mayor puntuación final a menor)
     resultados_carrera.sort(key=lambda x: x["puntos_carrera"], reverse=True)
     
-    # Reparto de puntos del campeonato por posición + Suma del Bonus de ahorro
     reparto_puntos_posicion = [10, 6, 4]
     print("\n🏆 RESULTADOS DE LA CARRERA (Puntos Posición + Puntos Ahorro):")
     for i, res in enumerate(resultados_carrera):
@@ -379,7 +375,6 @@ for carrera in range(1, 7):
     for letra, datos in vendedores.items():
         precios_anterior_carrera[letra] = datos["precios"].copy()
 
-    # Actualizamos estadísticas de mercado para la siguiente carrera
     estadisticas_ultima_carrera["demanda"] = demanda_carrera
     if resultados_carrera:
         componentes_ganador = resultados_carrera[0].get("componentes_usados", [])
@@ -388,12 +383,34 @@ for carrera in range(1, 7):
             uso_ganador[componente["slot"]] = componente["vendedor"]
         estadisticas_ultima_carrera["uso_ganador"] = uso_ganador
 
-    # Actualizar histórico
     historico_mercado = f"En la carrera {carrera} ocurrió lo siguiente:\n"
     historico_mercado += resumen_ventas_texto
     if resultados_carrera:
         historico_mercado += f"El ganador en pista fue {resultados_carrera[0]['piloto']}.\n"
     
+    media_velocidad_carrera = sum(res["puntos_carrera"] for res in resultados_carrera) / len(resultados_carrera)
+
+    for res in resultados_carrera:
+        p_nombre = res["piloto"]
+        originales = compras_carrera[p_nombre]
+        elecciones_hechas = {
+            "chasis": normalizar_vendedor(originales.vendedor_chasis),
+            "motor": normalizar_vendedor(originales.vendedor_motor),
+            "ruedas": normalizar_vendedor(originales.vendedor_ruedas)
+        }
+        
+        vel_piloto = res["puntos_carrera"]
+        # Sacamos la posición exacta en el podio (1 para el primero, 2 para el segundo, etc.)
+        posicion_podio = resultados_carrera.index(res) + 1
+        
+        # Llamamos al nuevo método de rendimiento y podio
+        objetos_pilotos[p_nombre].aprender_de_resultado_rendimiento(
+            elecciones_hechas=elecciones_hechas, 
+            rendimiento_pista=vel_piloto, 
+            media_parrilla=media_velocidad_carrera,
+            posicion_podio=posicion_podio  # <--- NUEVO PARÁMETRO MANDATORIO
+        )
+
     print("\n--------------------------------------------------\n")
 
 # ==================================================
