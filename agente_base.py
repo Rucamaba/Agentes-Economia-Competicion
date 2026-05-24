@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 import json
+import os
 
 
 class AgenteBase(ABC):
@@ -77,3 +78,48 @@ class AgenteBase(ABC):
         nuevo_valor = valor_actual + self.q_learning_rate * (objetivo - valor_actual)
         self.q_table[clave] = round(nuevo_valor, 4)
         return self.q_table[clave]
+
+    # -------------------------
+    # Persistence helpers
+    # -------------------------
+    def _memory_filename(self, folder="memoria"):
+        safe_name = self.nombre.replace(" ", "_")
+        cls = self.__class__.__name__
+        return os.path.join(folder, f"{cls}_{safe_name}.json")
+
+    def load_memory(self, folder="memoria"):
+        path = self._memory_filename(folder)
+        if not os.path.exists(path):
+            return False
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            # merge loaded structures (loaded values take precedence)
+            loaded_mem = data.get("memoria", {})
+            if isinstance(loaded_mem, dict):
+                # prefer loaded values, but don't discard defaults
+                merged = dict(self.memoria)
+                merged.update(loaded_mem)
+                self.memoria = merged
+            self.q_table.update(data.get("q_table", {}))
+            # restore action/reward history if present
+            if "historial_acciones" in data:
+                self.historial_acciones = data.get("historial_acciones", self.historial_acciones)
+            if "historial_recompensas" in data:
+                self.historial_recompensas = data.get("historial_recompensas", self.historial_recompensas)
+            return True
+        except Exception:
+            return False
+
+    def save_memory(self, folder="memoria"):
+        path = self._memory_filename(folder)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        data = {
+            "memoria": self.memoria,
+            "q_table": self.q_table,
+            "historial_acciones": self.historial_acciones,
+            "historial_recompensas": self.historial_recompensas,
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        return True

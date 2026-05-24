@@ -24,6 +24,6 @@ def calcular_coste_comprometido(contratos_piloto):
     return round(sum(contrato.get("coste_adelantado", 0.0) for contrato in contratos_piloto), 2)
 
 
-def calcular_presupuesto_disponible(contratos_piloto, presupuesto_base=100.0):
+def calcular_presupuesto_disponible(contratos_piloto, presupuesto_base=1000.0):
     presupuesto_restante = presupuesto_base - calcular_coste_comprometido(contratos_piloto)
     return max(0.0, round(presupuesto_restante, 2))

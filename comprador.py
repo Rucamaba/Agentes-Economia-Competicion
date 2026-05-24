@@ -9,6 +9,8 @@ class EleccionKart:
         self.vendedor_chasis = vendedor_chasis
         self.vendedor_motor = seller_motor
         self.vendedor_ruedas = vendedor_ruedas
+        # indicador opcional para plantarse (no comprar esta ronda)
+        self.plantarse = False
 
 class AgenteComprador(AgenteBase):
     def __init__(self, nombre):
@@ -21,17 +23,16 @@ class AgenteComprador(AgenteBase):
         self.alpha = self.parametros_aprendizaje["alpha"]
         self.temperatura = self.parametros_aprendizaje["temperatura"]  # Un pelo más frío para consolidar los setups campeones
         
-        self.q_chasis = {"A": 0.0, "B": 0.0, "C": 0.0}
-        self.q_motor = {"A": 0.0, "B": 0.0, "C": 0.0}
-        self.q_ruedas = {"A": 0.0, "B": 0.0, "C": 0.0}
+        self.q_chasis = {letra: 0.0 for letra in ["A", "B", "C", "D", "E"]}
+        self.q_motor = {letra: 0.0 for letra in ["A", "B", "C", "D", "E"]}
+        self.q_ruedas = {letra: 0.0 for letra in ["A", "B", "C", "D", "E"]}
         
         self.historico_rendimientos = []
         self.historial_resultados = []
         self.rendimiento_combinaciones = {}
         self.memoria["equilibrio_vendedor"] = {
-            "A": {"media": 0.0, "n": 0},
-            "B": {"media": 0.0, "n": 0},
-            "C": {"media": 0.0, "n": 0},
+            letra: {"media": 0.0, "n": 0}
+            for letra in ["A", "B", "C", "D", "E"]
         }
         self.memoria["combos_posicion"] = {}
         self.memoria["bloqueos_frecuentes"] = {"chasis": {}, "motor": {}, "ruedas": {}}
@@ -48,6 +49,11 @@ class AgenteComprador(AgenteBase):
         }
         self.memoria["evaluaciones_post_ronda"] = []
         self.memoria["pautas_recordadas"] = {}
+        # Intentamos cargar memoria persistida (si existe)
+        try:
+            self.load_memory()
+        except Exception:
+            pass
 
     def _perfil_estrategia_compra(self, estrategia):
         perfiles = {
@@ -214,6 +220,27 @@ class AgenteComprador(AgenteBase):
             for vendedor in bloqueos.get(slot, set()):
                 prev = self.memoria["bloqueos_frecuentes"][slot].get(vendedor, 0)
                 self.memoria["bloqueos_frecuentes"][slot][vendedor] = prev + 1
+        # --- Memoria corto plazo: guardamos última observación relevante ---
+        corto = self.memoria.get("corto_plazo", {})
+        corto["ultimo_precio"] = entorno.get("catalogo_vendedores", {})
+        corto["ultima_demanda"] = entorno.get("demanda_reciente", {})
+        corto["ultimo_contrato"] = entorno.get("contratos_activos", [])
+        self.memoria["corto_plazo"] = corto
+
+        # --- Memoria tendencia de precios (largo plazo) ---
+        tendencia = self.memoria.get("tendencia_precios", {})
+        catalogo = entorno.get("catalogo_vendedores", {})
+        for vendedor, datos in catalogo.items():
+            if vendedor not in tendencia:
+                tendencia[vendedor] = {"chasis": [], "motor": [], "ruedas": []}
+            for slot in ["chasis", "motor", "ruedas"]:
+                precio = datos["precios"].get(slot)
+                if precio is not None:
+                    tendencia[vendedor][slot].append(precio)
+                    # mantenemos ventana corta de 6 rondas
+                    tendencia[vendedor][slot] = tendencia[vendedor][slot][-6:]
+        self.memoria["tendencia_precios"] = tendencia
+
         self.memoria["ultima_observacion"] = entorno
         return entorno
 
@@ -222,16 +249,16 @@ class AgenteComprador(AgenteBase):
         return self.decidir(contexto)
 
     def _segmento_presupuesto(self, presupuesto):
-        if presupuesto < 70:
+        if presupuesto < 350:
             return "bajo"
-        if presupuesto < 90:
+        if presupuesto < 650:
             return "medio"
         return "alto"
 
     def _estado_q_compra(self, observacion):
         return self.construir_estado_compra(
             catalogo_vendedores=observacion.get("catalogo_vendedores", {}),
-            presupuesto_max=observacion.get("presupuesto_max", 100.0),
+            presupuesto_max=observacion.get("presupuesto_max", 1000.0),
             contratos_activos=observacion.get("contratos_activos", []),
             historial_resultados_anteriores=observacion.get("historial_resultados_anteriores", []),
         )
@@ -244,20 +271,22 @@ class AgenteComprador(AgenteBase):
         nivel_exploracion = max(0.05, 0.55 * (1.0 - progreso))
         estado = self.construir_estado_compra(
             catalogo_vendedores=observacion.get("catalogo_vendedores", {}),
-            presupuesto_max=observacion.get("presupuesto_max", 100.0),
+            presupuesto_max=observacion.get("presupuesto_max", 1000.0),
             contratos_activos=observacion.get("contratos_activos", []),
             historial_resultados_anteriores=observacion.get("historial_resultados_anteriores", []),
         )
         estrategia_compra = self._seleccionar_estrategia_compra(estado)
         decision = self.elegir_componentes_q(
             catalogo_vendedores=observacion.get("catalogo_vendedores", {}),
-            presupuesto_max=observacion.get("presupuesto_max", 100.0),
+            presupuesto_max=observacion.get("presupuesto_max", 1000.0),
             bloqueos_exclusividad=observacion.get("bloqueos_exclusividad", {}),
             contratos_activos=observacion.get("contratos_activos", []),
             historial_resultados_anteriores=observacion.get("historial_resultados_anteriores", []),
             estado_q=estado_q,
             estrategia_compra=estrategia_compra,
             nivel_exploracion=nivel_exploracion,
+            carrera_actual=carrera_actual,
+            total_carreras=total_carreras,
         )
         self.registrar_accion(
             {
@@ -296,6 +325,12 @@ class AgenteComprador(AgenteBase):
             presupuesto_disponible=resultado.get("presupuesto_disponible"),
         )
 
+        # Persistimos memoria tras aprender
+        try:
+            self.save_memory()
+        except Exception:
+            pass
+
     def funcion_objetivo_compra(self, puntos_esperados, gasto_imputable, presupuesto_max, valor_largo_plazo, estrategia="equilibrada"):
         """Objetivo del comprador.
 
@@ -332,13 +367,26 @@ class AgenteComprador(AgenteBase):
         gasto_norm = 1.0 - min(1.0, gasto_imputable / max(1.0, presupuesto_max))
 
         return (
-            0.26 * calidad_norm
-            + 0.18 * precio_norm
-            + 0.20 * gasto_norm
-            + 0.14 * estabilidad_proveedor
+            0.30 * calidad_norm
+            + 0.14 * precio_norm
+            + 0.16 * gasto_norm
+            + 0.12 * estabilidad_proveedor
             - 0.12 * riesgo_exclusividad
-            + 0.22 * sinergia_historial
+            + 0.16 * sinergia_historial
         )
+
+    def _coste_minimo_kart_actual(self, catalogo_vendedores, bloqueos_exclusividad):
+        costes_minimos = {}
+        for slot in ["chasis", "motor", "ruedas"]:
+            precios_slot = [
+                datos["precios"][slot]
+                for vendedor, datos in catalogo_vendedores.items()
+                if vendedor not in bloqueos_exclusividad.get(slot, set())
+            ]
+            if not precios_slot:
+                return None
+            costes_minimos[slot] = min(precios_slot)
+        return round(costes_minimos["chasis"] + costes_minimos["motor"] + costes_minimos["ruedas"], 2)
 
     def _estimar_utilidad_esperada_compra(
         self,
@@ -350,17 +398,17 @@ class AgenteComprador(AgenteBase):
     ):
         perfil = self._perfil_estrategia_compra(estrategia_compra)
         utilidad_inmediata = (
-            (perfil["peso_rendimiento"] * 0.45 * valor_objetivo)
-            + (perfil["peso_combinacion"] * valor_combinacion)
+            (perfil["peso_rendimiento"] * 0.60 * valor_objetivo)
+            + (perfil["peso_combinacion"] * 0.85 * valor_combinacion)
             + (perfil["peso_q"] * valor_q)
         )
         utilidad_futura = (
-            0.45 * valor_futuro
+            0.38 * valor_futuro
             + 0.20 * valor_q
-            + 0.15 * valor_combinacion
-            + 0.20 * valor_objetivo
+            + 0.12 * valor_combinacion
+            + 0.30 * valor_objetivo
         )
-        utilidad_total = utilidad_inmediata + (0.35 * utilidad_futura)
+        utilidad_total = utilidad_inmediata + (0.28 * utilidad_futura)
         return {
             "utilidad_inmediata": utilidad_inmediata,
             "utilidad_futura": utilidad_futura,
@@ -400,11 +448,34 @@ class AgenteComprador(AgenteBase):
             "rendimiento_combinaciones_pasadas": dict(self.rendimiento_combinaciones),
         }
 
-    def elegir_componentes_q(self, catalogo_vendedores, presupuesto_max=100.0, bloqueos_exclusividad=None, contratos_activos=None, historial_resultados_anteriores=None, estado_q=None, estrategia_compra=None, nivel_exploracion=0.1):
+    def elegir_componentes_q(
+        self,
+        catalogo_vendedores,
+        presupuesto_max=1000.0,
+        bloqueos_exclusividad=None,
+        contratos_activos=None,
+        historial_resultados_anteriores=None,
+        estado_q=None,
+        estrategia_compra=None,
+        nivel_exploracion=0.1,
+        carrera_actual=1,
+        total_carreras=10,
+    ):
         if bloqueos_exclusividad is None:
             bloqueos_exclusividad = {}
         if contratos_activos is None:
             contratos_activos = []
+
+        perfil_arranque = sum(ord(caracter) for caracter in self.nombre) % 4
+        objetivos_presupuesto_arranque = [0.18, 0.26, 0.34, 0.42]
+        objetivos_calidad_arranque = [0.26, 0.34, 0.42, 0.50]
+        objetivo_presupuesto_rel = objetivos_presupuesto_arranque[perfil_arranque]
+        objetivo_calidad_rel = objetivos_calidad_arranque[perfil_arranque]
+
+        umbral_top_calidad = {}
+        for slot in ["chasis", "motor", "ruedas"]:
+            calidades = sorted((datos[slot] for datos in catalogo_vendedores.values()), reverse=True)
+            umbral_top_calidad[slot] = calidades[1] if len(calidades) > 1 else (calidades[0] if calidades else 0.0)
 
         contratos_por_slot = {
             contrato["slot"]: contrato["vendedor"]
@@ -423,13 +494,22 @@ class AgenteComprador(AgenteBase):
         perfil_estrategia = self._perfil_estrategia_compra(estrategia_compra)
         segmento_presupuesto = self._segmento_presupuesto(estado["presupuesto_disponible"])
         estrategia_segmento = self.memoria["estrategia_presupuesto"][segmento_presupuesto]
+        carreras_restantes = max(0, total_carreras - carrera_actual)
+        coste_minimo_kart = self._coste_minimo_kart_actual(catalogo_vendedores, bloqueos_exclusividad)
+        presupuesto_objetivo_futuro = (
+            0.0 if coste_minimo_kart is None else (carreras_restantes * coste_minimo_kart)
+        )
+
+        # Si el presupuesto no alcanza el coste mínimo, seguiremos buscando alternativas
+        # más baratas en el loop de combinaciones (no nos 'plantamos' en el sentido de saltar la compra).
 
         combinaciones_validas = []
         combinaciones_disponibles = []
+        vendedores_disponibles = sorted(catalogo_vendedores.keys())
         
-        for v_ch in ["A", "B", "C"]:
-            for v_mo in ["A", "B", "C"]:
-                for v_ru in ["A", "B", "C"]:
+        for v_ch in vendedores_disponibles:
+            for v_mo in vendedores_disponibles:
+                for v_ru in vendedores_disponibles:
                     if v_ch in bloqueos_exclusividad.get("chasis", set()):
                         continue
                     if v_mo in bloqueos_exclusividad.get("motor", set()):
@@ -490,6 +570,18 @@ class AgenteComprador(AgenteBase):
                         ),
                     )
 
+                    # Tendencia de precios: penalizamos combos cuyos vendedores hayan subido precios
+                    tendencia = self.memoria.get("tendencia_precios", {})
+                    def pct_subida(vendor, slot):
+                        hist = tendencia.get(vendor, {}).get(slot, [])
+                        if len(hist) >= 2 and hist[0] > 0:
+                            return (hist[-1] - hist[0]) / max(1.0, hist[0])
+                        return 0.0
+                    subida_media = (
+                        pct_subida(v_ch, "chasis") + pct_subida(v_mo, "motor") + pct_subida(v_ru, "ruedas")
+                    ) / 3.0
+
+
                     puntos_esperados_ajustados = (eficiencia_mercado * 3.5) * (0.8 + estrategia_segmento["preferencia_rendimiento"])
                     control_gasto_ajustado = gasto_imputable * (1.0 + (estrategia_segmento["preferencia_ahorro"] - 0.5) * 0.3)
 
@@ -531,36 +623,119 @@ class AgenteComprador(AgenteBase):
                         valor_futuro=valor_futuro,
                         estrategia_compra=estrategia_compra,
                     )
-                    puntuacion_final = plan["utilidad_total"] + (0.12 * contratos_usados)
+                    saldo_post_compra = presupuesto_max - gasto_imputable
+                    if presupuesto_objetivo_futuro <= 0:
+                        cobertura_futura = 1.0
+                        deficit_futuro = 0.0
+                    else:
+                        cobertura_futura = max(0.0, min(1.0, saldo_post_compra / presupuesto_objetivo_futuro))
+                        deficit_futuro = max(0.0, presupuesto_objetivo_futuro - saldo_post_compra)
+
+                    penalizacion_sostenibilidad = 0.0
+                    if coste_minimo_kart and deficit_futuro > 0:
+                        penalizacion_sostenibilidad = (deficit_futuro / max(1.0, coste_minimo_kart)) * 0.90
+
+                    bonus_sostenibilidad = 0.18 * cobertura_futura
+                    info_combo = self.memoria.get("combos_posicion", {}).get(combo_key, {"n": 0, "media": 3.0, "ultimo": 3})
+                    uso_combo = info_combo.get("n", 0)
+                    media_pos_combo = info_combo.get("media", 3.0)
+                    ultima_pos_combo = info_combo.get("ultimo", media_pos_combo)
+                    penalizacion_repeticion = 0.0
+                    if ultima_pos_combo > 10.0:
+                        penalizacion_repeticion += 0.65
+                    elif ultima_pos_combo > 5.0:
+                        penalizacion_repeticion += 0.30
+
+                    if uso_combo >= 2 and media_pos_combo > 10.0:
+                        penalizacion_repeticion += 0.12 * min(4, uso_combo - 1) * min(1.0, (media_pos_combo - 10.0) / 10.0)
+                    puntuacion_final = (
+                        plan["utilidad_total"]
+                        + (0.12 * contratos_usados)
+                        + bonus_sostenibilidad
+                        - penalizacion_sostenibilidad
+                        - (0.5 * max(0.0, subida_media))
+                        - penalizacion_repeticion
+                    )
+
+                    if carrera_actual == 1:
+                        precio_relativo = precio_total / max(1.0, presupuesto_max)
+                        calidad_relativa = calidad_total / 30.0
+                        ajuste_presupuesto = max(0.0, 1.0 - (abs(precio_relativo - objetivo_presupuesto_rel) / 0.16))
+                        ajuste_calidad = max(0.0, 1.0 - (abs(calidad_relativa - objetivo_calidad_rel) / 0.14))
+                        piezas_top = sum(
+                            1
+                            for slot, vendedor in (("chasis", v_ch), ("motor", v_mo), ("ruedas", v_ru))
+                            if catalogo_vendedores[vendedor][slot] >= umbral_top_calidad[slot]
+                        )
+                        puntuacion_final += (0.60 * ajuste_presupuesto) + (0.35 * ajuste_calidad) - (0.30 * piezas_top)
+                        if precio_relativo <= 0.32:
+                            puntuacion_final += 0.12
+                        if precio_relativo >= 0.48:
+                            puntuacion_final -= 0.18
 
                     if gasto_imputable <= presupuesto_max:
                         combinaciones_validas.append({
                             "key": combo_key,
                             "v_ch": v_ch, "v_mo": v_mo, "v_ru": v_ru,
                             "puntuacion": puntuacion_final, "precio": precio_total, "gasto_imputable": gasto_imputable,
+                            "calidad_total": calidad_total,
+                            "valor_calidad_precio": calidad_total / max(1.0, gasto_imputable),
                             "contratos_usados": contratos_usados,
                             "valor_q": valor_q,
                             "utilidad_inmediata": plan["utilidad_inmediata"],
                             "utilidad_futura": plan["utilidad_futura"],
                             "utilidad_total": plan["utilidad_total"],
+                            "cobertura_futura": cobertura_futura,
+                            "deficit_futuro": deficit_futuro,
                         })
 
                     combinaciones_disponibles.append({
                         "key": combo_key,
                         "v_ch": v_ch, "v_mo": v_mo, "v_ru": v_ru,
                         "puntuacion": puntuacion_final, "precio": precio_total, "gasto_imputable": gasto_imputable,
+                        "calidad_total": calidad_total,
+                        "valor_calidad_precio": calidad_total / max(1.0, gasto_imputable),
                         "contratos_usados": contratos_usados,
                         "valor_q": valor_q,
                         "utilidad_inmediata": plan["utilidad_inmediata"],
                         "utilidad_futura": plan["utilidad_futura"],
                         "utilidad_total": plan["utilidad_total"],
+                        "cobertura_futura": cobertura_futura,
+                        "deficit_futuro": deficit_futuro,
                     })
+
+        if combinaciones_validas:
+            # Penalizamos combos sobrepreciados cuando existe una alternativa claramente mejor en valor:
+            # al menos 20% más barata y con una perdida de calidad muy pequena.
+            for combo in combinaciones_validas:
+                dominantes_valor = 0
+                for alternativa in combinaciones_validas:
+                    if alternativa["key"] == combo["key"]:
+                        continue
+                    ahorro_relativo = 1.0 - (alternativa["gasto_imputable"] / max(1.0, combo["gasto_imputable"]))
+                    perdida_calidad = combo["calidad_total"] - alternativa["calidad_total"]
+                    if ahorro_relativo >= 0.20 and perdida_calidad <= 1.5:
+                        dominantes_valor += 1
+
+                if dominantes_valor > 0:
+                    combo["puntuacion"] -= min(1.8, 0.55 * dominantes_valor)
 
         if not combinaciones_validas:
             if combinaciones_disponibles:
+                # Preferimos alternativas con menor gasto y menor tendencia alcista de sus vendedores
+                tendencia = self.memoria.get("tendencia_precios", {})
+                def tendencia_combo(c):
+                    vch, vmo, vru = c["v_ch"], c["v_mo"], c["v_ru"]
+                    def pct_sub(v, s):
+                        hist = tendencia.get(v, {}).get(s, [])
+                        if len(hist) >= 2 and hist[0] > 0:
+                            return (hist[-1] - hist[0]) / max(1.0, hist[0])
+                        return 0.0
+                    return (pct_sub(vch, "chasis") + pct_sub(vmo, "motor") + pct_sub(vru, "ruedas")) / 3.0
+
                 alternativa = min(
                     combinaciones_disponibles,
-                    key=lambda x: (-x["contratos_usados"], x["gasto_imputable"], x["precio"]),
+                    key=lambda x: (tendencia_combo(x), x["gasto_imputable"], x["precio"]),
                 )
                 razon = (
                     "⚠️ [Ajuste de emergencia] Sin combinación dentro de presupuesto; "
@@ -568,30 +743,44 @@ class AgenteComprador(AgenteBase):
                 )
                 return EleccionKart(f"[{estrategia_compra}] {razon}", alternativa["v_ch"], alternativa["v_mo"], alternativa["v_ru"])
 
-            return EleccionKart(f"[{estrategia_compra}] Mercado bloqueado por exclusividades. Sin proveedores disponibles.", "A", "A", "A")
+            vendedor_respaldo = next(iter(sorted(catalogo_vendedores.keys())), "A")
+            return EleccionKart(
+                f"[{estrategia_compra}] Mercado bloqueado por exclusividades. Sin proveedores disponibles.",
+                vendedor_respaldo,
+                vendedor_respaldo,
+                vendedor_respaldo,
+            )
 
         combinaciones_ordenadas = sorted(combinaciones_validas, key=lambda x: x["puntuacion"], reverse=True)
         mejor_opcion_absoluta = combinaciones_ordenadas[0]
 
-        empates_mejor = [c for c in combinaciones_ordenadas if abs(c["puntuacion"] - mejor_opcion_absoluta["puntuacion"]) <= 1e-9]
-        if len(empates_mejor) > 1:
-            elegida = random.choice(empates_mejor)
-            tipo_decision = "⚖️ [Desempate] Dos opciones rinden igual; el azar solo resuelve la igualdad."
-        elif len(combinaciones_ordenadas) > 1 and random.random() < nivel_exploracion:
-            limite = min(3, len(combinaciones_ordenadas))
-            explorables = combinaciones_ordenadas[:limite]
-            pesos = [1.0 / (indice + 1) for indice in range(limite)]
-            elegida = random.choices(explorables, weights=pesos, k=1)[0]
-            tipo_decision = "🔬 [Exploración Controlada] Probando una alternativa nueva con baja probabilidad."
+        def puntuacion_exploracion(combo):
+            uso_combo = self.memoria.get("combos_posicion", {}).get(combo["key"], {"n": 0}).get("n", 0)
+            novedad = 1.0 / (1.0 + uso_combo)
+            cobertura = combo.get("cobertura_futura", 0.0)
+            deficit = combo.get("deficit_futuro", 0.0)
+            return (
+                combo["puntuacion"]
+                + (0.24 * novedad)
+                + (0.05 * cobertura)
+                - (0.03 * min(deficit, estado["presupuesto_disponible"]) / max(1.0, estado["presupuesto_disponible"]))
+            )
+
+        limite = min(10 if carrera_actual == 1 else 5, len(combinaciones_ordenadas))
+        candidatas_exploracion = combinaciones_ordenadas[:limite]
+        elegida = max(candidatas_exploracion, key=puntuacion_exploracion)
+
+        if elegida["key"] == mejor_opcion_absoluta["key"]:
+            tipo_decision = "🧠 [Selección Estable] Se elige la mejor utilidad esperada ajustada por memoria."
         else:
-            elegida = mejor_opcion_absoluta
-            tipo_decision = "🧠 [Selección Estable] Se elige la utilidad esperada más alta."
+            tipo_decision = "🔬 [Exploración Guiada] Se prioriza una alternativa con novedad y mejor cobertura futura."
 
         razon = (
             f"[{estrategia_compra}] {tipo_decision} "
             f"utilidad esperada {round(elegida['utilidad_total'], 3)} "
             f"(inmediata {round(elegida['utilidad_inmediata'], 3)} | futura {round(elegida['utilidad_futura'], 3)}) "
-            f"Gasto bruto: {round(elegida['precio'], 2)}€ | coste economico: {round(elegida['gasto_imputable'], 2)}€"
+            f"Gasto bruto: {round(elegida['precio'], 2)}€ | coste economico: {round(elegida['gasto_imputable'], 2)}€ "
+            f"| cobertura futura: {round(elegida.get('cobertura_futura', 1.0) * 100, 1)}%"
         )
         return EleccionKart(razon, elegida["v_ch"], elegida["v_mo"], elegida["v_ru"])
 
@@ -613,7 +802,7 @@ class AgenteComprador(AgenteBase):
         stats_pos_combo = self.memoria["combos_posicion"].get(combo_key, {"media": 3.0, "n": 0})
         nuevo_n_pos = stats_pos_combo["n"] + 1
         nueva_media_pos = stats_pos_combo["media"] + ((posicion_podio - stats_pos_combo["media"]) / nuevo_n_pos)
-        self.memoria["combos_posicion"][combo_key] = {"media": round(nueva_media_pos, 4), "n": nuevo_n_pos}
+        self.memoria["combos_posicion"][combo_key] = {"media": round(nueva_media_pos, 4), "n": nuevo_n_pos, "ultimo": posicion_podio}
 
         for vendedor in [v_ch, v_mo, v_ru]:
             stats_eq = self.memoria["equilibrio_vendedor"].get(vendedor, {"media": 0.0, "n": 0})
@@ -641,11 +830,18 @@ class AgenteComprador(AgenteBase):
             }
         )
 
+        # Actualizamos corto plazo con el último rendimiento y contratos
+        corto = self.memoria.get("corto_plazo", {})
+        corto["ultimo_rendimiento"] = round(rendimiento_pista, 4)
+        ultimo_obs = self.memoria.get("ultima_observacion", {})
+        corto["ultimo_contrato"] = ultimo_obs.get("contratos_activos", [])
+        self.memoria["corto_plazo"] = corto
+
         accion_reciente = self.historial_acciones[-1] if self.historial_acciones else {}
         estrategia_actual = accion_reciente.get("estrategia_compra", "equilibrada")
         stats_estrategia = self.memoria["estrategias_compra"].get(estrategia_actual, {"media": 0.0, "n": 0})
         nuevo_n_estrategia = stats_estrategia["n"] + 1
-        score_estrategia = 1.0 if posicion_podio == 1 else (0.3 if posicion_podio == 2 else -0.8)
+        score_estrategia = 1.0 if posicion_podio == 1 else (0.3 if posicion_podio == 2 else (-1.2 if posicion_podio > 10 else -0.8))
         nueva_media_estrategia = stats_estrategia["media"] + ((score_estrategia - stats_estrategia["media"]) / nuevo_n_estrategia)
         self.memoria["estrategias_compra"][estrategia_actual] = {"media": round(nueva_media_estrategia, 4), "n": nuevo_n_estrategia}
 
